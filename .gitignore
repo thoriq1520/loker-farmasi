@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.cache/
+.taste-skill/*
+!.taste-skill/plan.md
+!.taste-skill/report.md
+.env
+.env.*
+!.env.example
+*.log
+Thumbs.db
+.DS_Store
