@@ -1,6 +1,9 @@
 node_modules/
 dist/
 .cache/
+.wrangler/
+.dev.vars
+.dev.vars.*
 .taste-skill/*
 !.taste-skill/plan.md
 !.taste-skill/report.md

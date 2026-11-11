@@ -22,6 +22,17 @@ npm start
 
 Buka **http://127.0.0.1:4173**. `vite preview` tidak menjalankan API pemeriksa lowongan; gunakan `npm start`.
 
+## Deploy ke Cloudflare
+
+Cloudflare Workers menyajikan tampilan dan `GET /api/jobs` dari Workers KV. GitHub Actions menjalankan pemeriksa yang sama dengan versi lokal setiap 30 menit, lalu mengirim hasilnya ke Worker. Dengan cara ini, pemeriksaan sumber yang melebihi batas 50 request per eksekusi dapat tetap berjalan saat memakai Workers Free.
+
+1. Push perubahan ini ke branch utama GitHub. Di Cloudflare **Workers & Pages**, sambungkan repo dan gunakan nama Worker **`loker-farmasi`**. Isi **Build command** dengan `npm run build`, **Deploy command** dengan `npx wrangler deploy`, dan **Preview command** dengan `npx wrangler preview`. Konfigurasi Wrangler menyediakan penyimpanan KV `JOB_SNAPSHOTS` saat deploy.
+2. Buat token acak, misalnya dengan `node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"`. Pada Worker, buka **Settings → Variables and Secrets**, lalu tambahkan token sebagai secret **`JOB_SNAPSHOT_TOKEN`**.
+3. Pada repo GitHub, buka **Settings → Secrets and variables → Actions**. Tambahkan **`JOB_SNAPSHOT_TOKEN`** sebagai repository secret dengan nilai yang sama. Tambahkan **`WORKER_URL`** di tab **Variables** dengan alamat HTTPS Worker yang sudah aktif, misalnya `https://loker-farmasi.nama-akun.workers.dev`. Simpan token hanya di kedua pengaturan secret.
+4. Di tab **Actions**, buka **Perbarui lowongan → Run workflow** pada branch utama untuk mengisi daftar pertama. Setelah workflow berhasil, buka alamat Worker atau periksa `/api/jobs`.
+
+Tombol **Muat ulang** pada versi cloud membaca hasil terbaru yang sudah disimpan. **Run workflow** menjalankan pemeriksaan baru. GitHub Actions dapat menunda jadwal dan hasil verifikasi yang sudah berumur 30 menit disembunyikan. Pada repo publik, GitHub dapat menonaktifkan jadwal setelah 60 hari tanpa aktivitas repo. Periksa kuota Actions jika repo privat. Lihat [konfigurasi Workers Builds](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/), [batas Workers](https://developers.cloudflare.com/workers/platform/limits/), dan [jadwal GitHub Actions](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule).
+
 ## Data dan aturan
 
 - Pemeriksaan saat aplikasi dimulai, lalu setiap **30 menit**. Tombol Perbarui meminta pemeriksaan tambahan dengan jeda minimum 60 detik. Permintaan bersamaan digabungkan.
@@ -77,4 +88,4 @@ npm run build
 
 Tes mencakup batas wilayah dan pendidikan, kedaluwarsa, urutan terbaru, filter, parsing data publik, penggabungan refresh, serta pembuangan data sumber yang gagal diperiksa.
 
-Proyek ini lokal; tidak ada deployment atau layanan latar di cloud. Pembaruan berhenti ketika proses aplikasi atau komputer dimatikan.
+Untuk versi lokal, pembaruan berhenti ketika proses aplikasi atau komputer dimatikan. Untuk versi Cloudflare, pembaruan mengikuti jadwal GitHub Actions.

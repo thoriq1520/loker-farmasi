@@ -94,9 +94,10 @@ test('refreshes are coalesced, source failures clear old jobs, and API blocks fo
     return { jobs: [{ ...job, id: source.id, company: source.id, sourceId: source.id, publishedAt: new Date(Date.now() - 1000).toISOString(), verifiedAt: checkedAt, validThrough: new Date(Date.now() + 86400000).toISOString() }], scanned: 1, note: 'Sudah diperiksa' };
   } });
   try {
-    await Promise.all([service.refresh(), service.refresh()]);
+    const snapshots = await Promise.all([service.refresh(), service.refresh()]);
     assert.equal(calls, SOURCES.length);
-    assert.equal(service.snapshot().jobs.length, SOURCES.length);
+    assert.equal(snapshots[0].jobs.length, SOURCES.length);
+    assert.deepEqual(snapshots[0], snapshots[1]);
     const res = { headers: {}, setHeader(k, v) { this.headers[k] = v; }, end(body) { this.body = JSON.parse(body); } };
     await handleApi({ url: '/api/jobs/refresh', method: 'POST', headers: { origin: 'https://unrelated.example', host: 'localhost:5173' } }, res, service);
     assert.equal(res.statusCode, 403);

@@ -23,7 +23,10 @@ export function createJobService({ collect = collectSource, interval = REFRESH_M
     };
   }
   async function refresh() {
-    if (inFlight) return inFlight;
+    if (inFlight) {
+      await inFlight;
+      return snapshot();
+    }
     const checkedAt = new Date().toISOString();
     controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 65000);

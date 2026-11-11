@@ -74,7 +74,7 @@ function App() {
         timeout = setTimeout(load, next.refreshing ? 2000 : 30000);
       } catch (err) {
         if (!mounted.current || err.name === 'AbortError') return;
-        setError('Koneksi terputus. Pastikan aplikasi masih berjalan.');
+        setError('Koneksi terputus. Coba lagi.');
         setData(current => ({ ...current, jobs: [], refreshing: false }));
         timeout = setTimeout(load, 10000);
       }
@@ -95,10 +95,12 @@ function App() {
   async function refresh() {
     setBusy(true); setError('');
     try {
-      const res = await fetch('/api/jobs/refresh', { method: 'POST', signal: AbortSignal.timeout(75000) });
+      const res = snapshotMode
+        ? await fetch('/api/jobs', { signal: AbortSignal.timeout(15000) })
+        : await fetch('/api/jobs/refresh', { method: 'POST', signal: AbortSignal.timeout(75000) });
       if (!res.ok) throw new Error();
       const next = await res.json();
-      if (mounted.current) { setData(next); setNow(Date.now()); setNotice('Lowongan diperbarui.'); }
+      if (mounted.current) { setData(next); setNow(Date.now()); setNotice(snapshotMode ? 'Daftar dimuat ulang.' : 'Lowongan diperbarui.'); }
     } catch { if (mounted.current) setError('Gagal memperbarui. Coba lagi.'); }
     finally { if (mounted.current) setBusy(false); }
   }
@@ -114,6 +116,9 @@ function App() {
   const jobs = selectJobs(data.jobs, { query, source, days, salary, fresh, saved: tab === 'saved' ? saved : null }, now);
   const pagination = paginateJobs(jobs, page, pageSize);
   const checking = busy || data.refreshing;
+  const snapshotMode = data.refreshMode === 'snapshot';
+  const checkingLabel = snapshotMode ? 'Memuat' : 'Memeriksa';
+  const refreshLabel = snapshotMode ? 'Muat ulang' : 'Perbarui';
   const connected = data.sources.filter(item => item.status === 'ok' || item.status === 'partial').length;
   const hasFilter = !!(query || source || days || salary || fresh);
 
@@ -171,7 +176,10 @@ function App() {
 
         <div className="results-column" id="results">
           <div className="results-heading"><div className="result-title-row"><h2>{tab === 'saved' ? 'Tersimpan' : 'Lowongan terbaru'}</h2><span className="total-badge" aria-label={`${jobs.length} lowongan`}>{jobs.length}</span></div><div className="sort-label"><Icon name="clock" size={16} />Paling baru</div></div>
-          <div className="results-meta"><span aria-live="polite">{checking ? 'Sedang memeriksa sumber lowongan…' : data.lastCheckedAt ? `Diperiksa ${date(data.lastCheckedAt)}, ${time(data.lastCheckedAt)}` : 'Menunggu pemeriksaan sumber'}</span><button className="refresh-button" onClick={refresh} disabled={checking}><Icon name="refresh" size={16} className={checking ? 'spinning' : ''} />{checking ? 'Memeriksa' : 'Perbarui'}</button></div>
+          <div className="results-meta">
+            <span aria-live="polite">{checking ? (snapshotMode ? 'Memuat daftar lowongan…' : 'Sedang memeriksa sumber lowongan…') : data.lastCheckedAt ? `Diperiksa ${date(data.lastCheckedAt)}, ${time(data.lastCheckedAt)}` : 'Menunggu pemeriksaan sumber'}</span>
+            <button className="refresh-button" onClick={refresh} disabled={checking}><Icon name="refresh" size={16} className={checking ? 'spinning' : ''} />{checking ? checkingLabel : refreshLabel}</button>
+          </div>
           {error && <div className="notice error-notice" role="alert"><Icon name="alert" /><p>{error}</p></div>}
           {checking && !data.lastCheckedAt ? <div className="loading-state" role="status"><span className="loading-ring" /><h3>Memuat lowongan…</h3></div> : jobs.length ? <div className="job-list">{pagination.items.map(job => <article className="job-card card" key={job.id}>
             <div className="job-card-top"><span className="company-initial" aria-hidden="true">{job.company.slice(0, 2).toUpperCase()}</span><div className="company-name">{job.company}<span className={job.needsConfirmation ? 'needs-confirmation' : ''}><span className={`status-dot ${job.needsConfirmation ? 'pending' : 'good'}`} />{job.needsConfirmation ? 'Perlu konfirmasi' : 'Aktif di sumber'}</span></div><button className={`icon-button save-button ${saved.includes(job.id) ? 'is-saved' : ''}`} aria-label={saved.includes(job.id) ? `Hapus ${job.title} dari simpanan` : `Simpan ${job.title}`} aria-pressed={saved.includes(job.id)} onClick={() => saveJob(job)}><Icon name="bookmark" /></button></div>
