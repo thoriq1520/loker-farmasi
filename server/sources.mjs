@@ -1,3 +1,4 @@
+import { Buffer } from 'node:buffer';
 import { timestamp, acceptsD3, inArea, threeMonthsAgo, CITY } from '../src/jobs.mjs';
 
 export const SEARCH_TERMS = [
@@ -5,6 +6,9 @@ export const SEARCH_TERMS = [
   'TTK', 'Tenaga Teknis Kefarmasian', 'TVF', 'Tenaga Vokasi Farmasi',
   'asisten apoteker', 'apoteker', 'kefarmasian', 'apotek',
 ];
+
+export const KITA_AREAS = ['Kota Bandung', 'Kabupaten Bandung', 'Kabupaten Bandung Barat', 'Kota Cimahi'];
+export const JOBSTREET_AREAS = ['Bandung', 'Cimahi'];
 
 export const SOURCES = [
   { id: 'kitalulus', name: 'KitaLulus', url: 'https://www.kitalulus.com/lowongan?keyword=farmasi&location=Bandung', description: 'Lowongan publik dan status dari KitaLulus.' },
@@ -120,35 +124,68 @@ export function fromKita(v, verifiedAt) {
   };
 }
 
-async function read(url, signal, ajax = false, method = 'GET') {
-  const response = await fetch(url, {
-    method, signal: AbortSignal.any([signal, AbortSignal.timeout(18000)]),
+function requestOptions(signal, ajax, method) {
+  return {
+    method, signal,
     headers: {
       Accept: 'text/html,application/json',
       ...(ajax ? { 'X-Requested-With': 'XMLHttpRequest' } : {}),
       ...(method === 'POST' ? { 'Content-Type': 'application/x-www-form-urlencoded' } : {}),
     },
-  });
-  if (!response.ok) throw new Error(response.status === 403 || response.status === 429 ? `Akses otomatis dibatasi (${response.status}).` : `Sumber merespons HTTP ${response.status}.`);
+  };
+}
+
+async function read(url, requests, ajax = false, method = 'GET') {
+  const signal = AbortSignal.any([requests.signal, AbortSignal.timeout(18000)]);
+  let response;
+  if (requests.remaining === undefined) {
+    response = await fetch(url, requestOptions(signal, ajax, method));
+  } else {
+    for (let redirects = 0; ; redirects++) {
+      signal.throwIfAborted();
+      if (requests.remaining <= 0) throw new Error('Batas permintaan sumber tercapai.');
+      requests.remaining--;
+      response = await fetch(url, { ...requestOptions(signal, ajax, method), redirect: 'manual' });
+      const location = response.headers.get('Location');
+      if (!location || ![301, 302, 303, 307, 308].includes(response.status)) break;
+      const next = new URL(location, url);
+      await response.body?.cancel();
+      const host = value => value.hostname.replace(/^www\./, '');
+      if (redirects >= 3 || next.protocol !== 'https:' || next.username || next.password ||
+          next.port || host(next) !== host(new URL(url))) throw new Error('Pengalihan halaman sumber tidak dapat diikuti.');
+      if (method === 'POST' && [301, 302, 303].includes(response.status)) method = 'GET';
+      url = next.href;
+    }
+  }
+  if (!response.ok) {
+    await response.body?.cancel();
+    throw new Error(response.status === 403 || response.status === 429 ? `Akses otomatis dibatasi (${response.status}).` : `Sumber merespons HTTP ${response.status}.`);
+  }
   const html = await response.text();
   if (html.length > 6_000_000) throw new Error('Respons sumber terlalu besar untuk diperiksa.');
   return html;
 }
 
-async function searchPages(urls, signal, markers, ajax = false) {
-  const results = await Promise.allSettled(urls.map(async url => {
-    const html = await read(url, signal, ajax);
+async function searchPages(urls, requests, markers, ajax = false) {
+  const readPage = async url => {
+    const html = await read(url, requests, ajax);
     if (!markers.every(marker => html.includes(marker))) throw new Error('Format daftar sumber berubah; data belum bisa diverifikasi.');
     return html;
-  }));
+  };
+  const results = [];
+  const concurrency = requests.remaining === undefined ? urls.length : 4;
+  for (let offset = 0; offset < urls.length; offset += concurrency) {
+    results.push(...await Promise.allSettled(urls.slice(offset, offset + concurrency).map(readPage)));
+  }
   const pages = results.filter(result => result.status === 'fulfilled').map(result => result.value);
   if (!pages.length) throw results.find(result => result.status === 'rejected').reason;
   return { pages, failed: results.length - pages.length };
 }
 
-async function kitalulus(signal, verifiedAt) {
-  const urls = ['Kota Bandung', 'Kabupaten Bandung', 'Kabupaten Bandung Barat', 'Kota Cimahi'].flatMap(location => SEARCH_TERMS.map(term => `https://www.kitalulus.com/lowongan?keyword=${encodeURIComponent(term)}&location=${encodeURIComponent(location)}`));
-  const { pages, failed: failedSearches } = await searchPages(urls, signal, ['self.__next_f.push', 'Info Loker']);
+async function kitalulus(requests, verifiedAt, area) {
+  const limit = area ? 10 : 40;
+  const urls = (area ? [area] : KITA_AREAS).flatMap(location => SEARCH_TERMS.map(term => `https://www.kitalulus.com/lowongan?keyword=${encodeURIComponent(term)}&location=${encodeURIComponent(location)}`));
+  const { pages, failed: failedSearches } = await searchPages(urls, requests, ['self.__next_f.push', 'Info Loker']);
   const candidates = new Map();
   for (const html of pages) for (const v of flightVacancies(html)) {
     // A title is not an education requirement: inspect any local candidate's actual qualifications.
@@ -157,16 +194,16 @@ async function kitalulus(signal, verifiedAt) {
   const jobs = [];
   let failed = 0;
   // ponytail: at most 40 detail pages per refresh; add pagination if this niche outgrows the first result pages.
-  for (const v of [...candidates.values()].slice(0, 40)) {
+  for (const v of [...candidates.values()].slice(0, limit)) {
     try {
-      const html = await read(`https://www.kitalulus.com/lowongan/detail/${encodeURIComponent(v.slug)}`, signal);
+      const html = await read(`https://www.kitalulus.com/lowongan/detail/${encodeURIComponent(v.slug)}`, requests);
       const detail = flightVacancies(html).find(x => x.slug === v.slug && typeof x.description === 'string');
       if (!detail) throw new Error('Detail tidak ditemukan');
       jobs.push(fromKita(detail, verifiedAt));
     } catch { failed++; }
   }
-  const limited = candidates.size > 40;
-  return { jobs, scanned: candidates.size, partial: failed > 0 || failedSearches > 0 || limited, note: failed || failedSearches || limited ? `${failedSearches} pencarian dan ${failed} detail gagal diperiksa.${limited ? ' Batas 40 detail tercapai; hasil belum lengkap.' : ''} Hanya hasil terverifikasi yang ditampilkan.` : 'Daftar dan status lowongan berhasil diperiksa.' };
+  const limited = candidates.size > limit;
+  return { jobs, scanned: candidates.size, partial: failed > 0 || failedSearches > 0 || limited, note: failed || failedSearches || limited ? `${failedSearches} pencarian dan ${failed} detail gagal diperiksa.${limited ? ' Batas ' + limit + ' detail tercapai; hasil belum lengkap.' : ''} Hanya hasil terverifikasi yang ditampilkan.` : 'Daftar dan status lowongan berhasil diperiksa.' };
 }
 
 export function jsonLdJobs(html) {
@@ -243,12 +280,13 @@ export function fromJobstreet(job, verifiedAt, listingDate) {
   };
 }
 
-async function jobstreet(signal, verifiedAt) {
+async function jobstreet(requests, verifiedAt, area) {
+  const limit = area ? 25 : 50;
   // Observed public website service, not SEEK's separately authenticated partner API.
-  const results = await Promise.allSettled(['Bandung', 'Cimahi'].flatMap(location => ['D3 Farmasi', 'farmasi', 'TTK', 'TVF'].map(async term => {
+  const results = await Promise.allSettled((area ? [area] : JOBSTREET_AREAS).flatMap(location => ['D3 Farmasi', 'farmasi', 'TTK', 'TVF'].map(async term => {
     const url = new URL('https://id.jobstreet.com/api/jobsearch/v5/search');
     url.search = new URLSearchParams({ siteKey: 'ID-Main', keywords: term, where: location, sortMode: 'ListedDate', pageSize: '30', page: '1' });
-    const data = JSON.parse(await read(url.href, signal));
+    const data = JSON.parse(await read(url.href, requests));
     if (!Array.isArray(data.data)) throw new Error('Format pencarian Jobstreet berubah; data belum bisa diverifikasi.');
     return data.data;
   })));
@@ -258,26 +296,26 @@ async function jobstreet(signal, verifiedAt) {
   for (const page of pages) for (const item of page.value) {
     if (/^\d+$/.test(String(item.id))) candidates.set(String(item.id), item);
   }
-  const selected = [...candidates.values()].sort((a, b) => timestamp(b.listingDate) - timestamp(a.listingDate)).slice(0, 50);
+  const selected = [...candidates.values()].sort((a, b) => timestamp(b.listingDate) - timestamp(a.listingDate)).slice(0, limit);
   const jobs = []; let failed = 0;
   for (const item of selected) {
     try {
-      const html = await read(`https://id.jobstreet.com/id/job/${item.id}`, signal);
+      const html = await read(`https://id.jobstreet.com/id/job/${item.id}`, requests);
       const job = jobstreetJob(html, item.id);
       if (!job) throw new Error('Detail Jobstreet belum dapat dibaca.');
       jobs.push(fromJobstreet(job, verifiedAt, item.listingDate));
     } catch { failed++; }
   }
   const failedSearches = results.length - pages.length;
-  const limited = candidates.size > 50;
+  const limited = candidates.size > limit;
   return {
     jobs, scanned: candidates.size, partial: failed > 0 || failedSearches > 0 || limited,
-    note: `Pencarian JSON dan ${selected.length - failed} detail publik berhasil dibaca.${failedSearches || failed ? ` ${failedSearches} pencarian dan ${failed} detail gagal diperiksa.` : ''}${limited ? ' Batas 50 detail tercapai; hasil belum lengkap.' : ''}`,
+    note: `Pencarian JSON dan ${selected.length - failed} detail publik berhasil dibaca.${failedSearches || failed ? ` ${failedSearches} pencarian dan ${failed} detail gagal diperiksa.` : ''}${limited ? ' Batas ' + limit + ' detail tercapai; hasil belum lengkap.' : ''}`,
   };
 }
 
-async function portal(source, signal, verifiedAt) {
-  const html = await read(source.url, signal);
+async function portal(source, requests, verifiedAt) {
+  const html = await read(source.url, requests);
   const links = [...html.matchAll(/href=["']([^"']+)["']/gi)].map(m => { try { return new URL(m[1].replace(/&amp;/g, '&'), source.url); } catch { return null; } })
     .filter(url => url && url.origin === new URL(source.url).origin && (source.id === 'glints' ? /\/opportunities\/jobs\//.test(url.pathname) : /\/job\/\d+/.test(url.pathname)));
   const urls = [...new Set(links.map(url => url.origin + url.pathname))].slice(0, 25);
@@ -285,7 +323,7 @@ async function portal(source, signal, verifiedAt) {
   const jobs = []; let failed = 0;
   for (const url of urls) {
     try {
-      const detail = await read(url, signal);
+      const detail = await read(url, requests);
       if (closedPage(detail)) continue;
       const records = jsonLdJobs(detail);
       if (!records.length) { failed++; continue; }
@@ -295,16 +333,16 @@ async function portal(source, signal, verifiedAt) {
   return { jobs, scanned: urls.length, partial: failed > 0, note: failed ? `${failed} detail belum dapat diverifikasi dan disembunyikan.` : 'Metadata dan batas lamaran berhasil diperiksa.' };
 }
 
-async function bimma(signal, verifiedAt) {
+async function bimma(requests, verifiedAt) {
   const jobs = []; const urls = new Set();
-  const { pages, failed: failedSearches } = await searchPages(SEARCH_TERMS.map(term => `https://disnaker.bandung.go.id/loker/get-data-local?search=${encodeURIComponent(term)}&page=1`), signal, ['pagination-meta'], true);
+  const { pages, failed: failedSearches } = await searchPages(SEARCH_TERMS.map(term => `https://disnaker.bandung.go.id/loker/get-data-local?search=${encodeURIComponent(term)}&page=1`), requests, ['pagination-meta'], true);
   for (const html of pages) {
     for (const m of html.matchAll(/href=["'](https:\/\/disnaker\.bandung\.go\.id\/detail-loker\/\d+)["']/g)) urls.add(m[1]);
   }
   let failed = 0;
   for (const url of [...urls].slice(0, 30)) {
     try {
-      const html = await read(url, signal);
+      const html = await read(url, requests);
       if (closedPage(html)) continue;
       // Only trust explicit structured metadata; do not guess location from an employer's office.
       const records = jsonLdJobs(html);
@@ -349,12 +387,12 @@ function pageMetadata(html, url) {
   return {};
 }
 
-async function checkedDetails(source, urls, signal, verifiedAt, parse, searchNote = '', failedSearches = 0) {
+async function checkedDetails(source, urls, requests, verifiedAt, parse, searchNote = '', failedSearches = 0) {
   const selected = [...new Set(urls)].slice(0, 30);
   const jobs = []; let failed = 0, incomplete = 0;
   // ponytail: four public detail requests at a time, at most 30 per source; paginate when this niche outgrows it.
   for (let offset = 0; offset < selected.length; offset += 4) {
-    const batch = await Promise.allSettled(selected.slice(offset, offset + 4).map(async url => parse(await read(url, signal), url, verifiedAt, source)));
+    const batch = await Promise.allSettled(selected.slice(offset, offset + 4).map(async url => parse(await read(url, requests), url, verifiedAt, source)));
     for (const result of batch) {
       if (result.status === 'rejected') { failed++; continue; }
       const records = [result.value].flat().filter(Boolean);
@@ -412,10 +450,10 @@ export function fromFarmacare(html, url, verifiedAt, source = SOURCES.find(item 
   });
 }
 
-async function farmacare(source, signal, verifiedAt) {
-  const html = await read(source.url, signal);
+async function farmacare(source, requests, verifiedAt) {
+  const html = await read(source.url, requests);
   if (!html.includes('loker-table')) throw new Error('Format daftar Farmacare berubah; belum dapat diperiksa.');
-  return checkedDetails(source, farmacareCandidates(html), signal, verifiedAt, fromFarmacare);
+  return checkedDetails(source, farmacareCandidates(html), requests, verifiedAt, fromFarmacare);
 }
 
 export function fromLokerBandung(html, url, verifiedAt, source = SOURCES.find(item => item.id === 'lokerbandung')) {
@@ -441,10 +479,10 @@ export function fromLokerBandung(html, url, verifiedAt, source = SOURCES.find(it
   }).filter(Boolean);
 }
 
-async function lokerBandung(source, signal, verifiedAt) {
-  const { pages, failed } = await searchPages([source.url, ...['farmasi', 'TTK', 'TVF'].map(term => `https://www.lokerbandung.id/?s=${term}`)], signal, ['LokerBandung']);
+async function lokerBandung(source, requests, verifiedAt) {
+  const { pages, failed } = await searchPages([source.url, ...['farmasi', 'TTK', 'TVF'].map(term => `https://www.lokerbandung.id/?s=${term}`)], requests, ['LokerBandung']);
   const urls = [...new Set(pages.flatMap(html => publicLinks(html.split('<div id="loker-container">')[1] || '', 'https://www.lokerbandung.id', /^\/lowongan\/[^/]+\/?$/)))];
-  return checkedDetails(source, urls, signal, verifiedAt, fromLokerBandung, '', failed);
+  return checkedDetails(source, urls, requests, verifiedAt, fromLokerBandung, '', failed);
 }
 
 export function fromMedion(html, url, verifiedAt, source = SOURCES.find(item => item.id === 'medion'), listed = {}) {
@@ -464,13 +502,13 @@ export function fromMedion(html, url, verifiedAt, source = SOURCES.find(item => 
   });
 }
 
-async function medion(source, signal, verifiedAt) {
-  const data = JSON.parse(await read('https://www.medion.co.id/wp-json/wp/v2/career_post?per_page=100', signal));
+async function medion(source, requests, verifiedAt) {
+  const data = JSON.parse(await read('https://www.medion.co.id/wp-json/wp/v2/career_post?per_page=100', requests));
   if (!Array.isArray(data)) throw new Error('Format daftar karier Medion berubah.');
   const candidates = data.filter(job => job.status === 'publish' && job.class_list?.includes('career-department-taxonomy-farmasi') && job.class_list?.includes('educution-category-d3'));
   const allowed = candidates.filter(job => /^https:\/\/www\.medion\.co\.id\/karir\/[^/]+\/$/.test(job.link));
   const byUrl = new Map(allowed.map(job => [job.link, job]));
-  const result = await checkedDetails(source, [...byUrl.keys()], signal, verifiedAt, (html, url) => fromMedion(html, url, verifiedAt, source, byUrl.get(url)));
+  const result = await checkedDetails(source, [...byUrl.keys()], requests, verifiedAt, (html, url) => fromMedion(html, url, verifiedAt, source, byUrl.get(url)));
   if (data.length === 100) { result.partial = true; result.note += ' Batas 100 posisi tercapai; daftar belum lengkap.'; }
   return result;
 }
@@ -520,11 +558,11 @@ function hospitalNotice(source, url, verifiedAt, { title, content, publishedAt }
   });
 }
 
-async function borromeus(source, signal, verifiedAt) {
+async function borromeus(source, requests, verifiedAt) {
   // Public list requested by the portal's home page, with no filters, account or application submission.
   const portal = 'https://117.102.68.252/recruitmentportal';
   const list = 'https://117.102.68.252/RecruitmentPortal/Home/HomeVacancyList';
-  const html = await read(list, signal, true, 'POST');
+  const html = await read(list, requests, true, 'POST');
   const cards = html.split(/<div class="box box-solid">/i).slice(1);
   if (!cards.length && !/tidak ada lowongan|tidak ditemukan/i.test(plain(html))) throw new Error('Daftar rekrutmen Borromeus belum dapat dibaca.');
   const jobs = [];
@@ -542,12 +580,12 @@ async function borromeus(source, signal, verifiedAt) {
   return { jobs, scanned: cards.length, partial, note: partial ? 'Tanggal tayang atau penutupan belum tersedia untuk semua posisi publik.' : 'Daftar rekrutmen publik diperiksa.' };
 }
 
-async function alislam(source, signal, verifiedAt) {
+async function alislam(source, requests, verifiedAt) {
   const api = 'https://www.rsalislam.com/wp-json/wp/v2/';
-  const categories = JSON.parse(await read(api + 'categories?slug=karir', signal));
+  const categories = JSON.parse(await read(api + 'categories?slug=karir', requests));
   const category = categories.find(item => item.slug === 'karir' && Number.isInteger(item.id));
   if (!category) throw new Error('Kategori Karir RS Al Islam belum dapat dibaca.');
-  const posts = JSON.parse(await read(api + 'posts?categories=' + category.id + '&per_page=20&_fields=link,title,content,date,status', signal));
+  const posts = JSON.parse(await read(api + 'posts?categories=' + category.id + '&per_page=20&_fields=link,title,content,date,status', requests));
   if (!Array.isArray(posts)) throw new Error('Daftar Karir RS Al Islam belum dapat dibaca.');
   const notices = posts.filter(post => post.status === 'publish' && /^https:\/\/www\.rsalislam\.com\/[^/?#]+\/?$/.test(post.link) && recentPosting(post.date, verifiedAt));
   const jobs = notices.flatMap(post => hospitalNotice(source, post.link, verifiedAt, {
@@ -556,8 +594,8 @@ async function alislam(source, signal, verifiedAt) {
   return { jobs, scanned: posts.length, partial: posts.length === 20 || notices.some(post => !hospitalDeadlines(plain(post.content?.rendered)).length), note: 'Kategori Karir RS Al Islam diperiksa.' };
 }
 
-async function rshs(source, signal, verifiedAt) {
-  const { data, totalPages } = JSON.parse(await read('https://rshs.go.id/api/articles?page=1&per_page=30', signal));
+async function rshs(source, requests, verifiedAt) {
+  const { data, totalPages } = JSON.parse(await read('https://rshs.go.id/api/articles?page=1&per_page=30', requests));
   if (!Array.isArray(data)) throw new Error('Daftar pengumuman RSHS belum dapat dibaca.');
   const notices = data.filter(post => post.status === 'publish' && Number.isInteger(post.id) && isRecruitment(plain(post.title)) && recentPosting(post.published_at, verifiedAt));
   const jobs = notices.flatMap(post => hospitalNotice(source, 'https://rshs.go.id/berita/detail/' + post.id, verifiedAt, {
@@ -566,15 +604,15 @@ async function rshs(source, signal, verifiedAt) {
   return { jobs, scanned: data.length, partial: totalPages > 1 || notices.some(post => !hospitalDeadlines(plain(post.content)).length), note: 'Berita dan pengumuman RSHS diperiksa.' };
 }
 
-async function advent(source, signal, verifiedAt) {
+async function advent(source, requests, verifiedAt) {
   const origin = 'https://rsadventbandung.com';
-  const { pages, failed } = await searchPages([origin + '/articles', origin + '/news-program'], signal, ['icon-calendar3']);
+  const { pages, failed } = await searchPages([origin + '/articles', origin + '/news-program'], requests, ['icon-calendar3']);
   const urls = pages.flatMap(page => page.split(/<div class="entry col-/i).slice(1).flatMap(card => {
     const title = plain(card.match(/<h3\b[^>]*>([\s\S]*?)<\/h3>/i)?.[1]);
     const date = sourceDate(plain(card.match(/icon-calendar3[^>]*><\/i>([^<]+)/i)?.[1]));
     return isRecruitment(title) && recentPosting(date, verifiedAt) ? publicLinks(card, origin, /^\/(?:articles|news-program)\/[^/]+\/?$/).slice(0, 1) : [];
   }));
-  return checkedDetails(source, urls, signal, verifiedAt, (html, url) => {
+  return checkedDetails(source, urls, requests, verifiedAt, (html, url) => {
     const entry = html.split('class="entry clearfix"')[1]?.split('<!-- .entry end -->')[0] || '';
     const title = plain(entry.match(/<h1\b[^>]*>([\s\S]*?)<\/h1>/i)?.[1]);
     const publishedAt = sourceDate(plain(entry.match(/icon-calendar3[^>]*><\/i>([^<]+)/i)?.[1]));
@@ -583,15 +621,15 @@ async function advent(source, signal, verifiedAt) {
   }, 'Artikel dan berita RS Advent diperiksa.', failed);
 }
 
-async function rsudBandung(source, signal, verifiedAt) {
-  const page = await read(source.url, signal);
+async function rsudBandung(source, requests, verifiedAt) {
+  const page = await read(source.url, requests);
   if (!page.includes('Artikel tentang pengumuman')) throw new Error('Daftar pengumuman RSUD Kota Bandung belum dapat dibaca.');
   const origin = new URL(source.url).origin;
   const urls = [...page.matchAll(/<h4>\s*(<a\b[^>]*>([\s\S]*?)<\/a>)\s*<\/h4>([\s\S]*?)<\/p>/gi)].flatMap(([, link, title, meta]) => {
     const date = sourceDate(plain(meta.match(/fa-calendar[^>]*><\/i>\s*<span>([^<]+)/i)?.[1]).split(',').at(-1).trim());
     return isRecruitment(plain(title)) && recentPosting(date, verifiedAt) ? publicLinks(link, origin, /^\/blog\/[^/]+$/) : [];
   });
-  return checkedDetails(source, urls, signal, verifiedAt, (html, url) => {
+  return checkedDetails(source, urls, requests, verifiedAt, (html, url) => {
     const detail = html.split('class="blog-detail clearfix"')[1]?.split('<!-- Blog Detail End -->')[0] || '';
     const title = plain(detail.match(/<h1\b[^>]*>([\s\S]*?)<\/h1>/i)?.[1]);
     const date = plain(detail.match(/fa-calendar[^>]*><\/i>\s*<span>([^<]+)/i)?.[1]);
@@ -608,10 +646,10 @@ export function fromRedy(html, url, verifiedAt, source = SOURCES.find(item => it
   return null;
 }
 
-async function redy(source, signal, verifiedAt) {
-  const { pages, failed } = await searchPages(['farmasi', 'TTK', 'TVF', 'apoteker'].map(term => `https://www.getredy.id/lowongan/1?search=${term}`), signal, ['Informasi Lowongan Kerja Terbaru']);
+async function redy(source, requests, verifiedAt) {
+  const { pages, failed } = await searchPages(['farmasi', 'TTK', 'TVF', 'apoteker'].map(term => `https://www.getredy.id/lowongan/1?search=${term}`), requests, ['Informasi Lowongan Kerja Terbaru']);
   const urls = [...new Set(pages.flatMap(html => publicLinks(html, 'https://www.getredy.id', /^\/lowongan\/detail\/\d+-/)))];
-  return checkedDetails(source, urls, signal, verifiedAt, fromRedy, 'Pencarian publik REDY terbaca; detail tanpa tanggal tayang dan status terverifikasi disembunyikan.', failed);
+  return checkedDetails(source, urls, requests, verifiedAt, fromRedy, 'Pencarian publik REDY terbaca; detail tanpa tanggal tayang dan status terverifikasi disembunyikan.', failed);
 }
 
 export function telegramPosts(html, channel) {
@@ -660,10 +698,10 @@ export function fromTelegram(post, verifiedAt) {
   };
 }
 
-async function telegram(signal, verifiedAt) {
+async function telegram(requests, verifiedAt) {
   // ponytail: newest public preview and one keyword page per channel; no full archive or poster OCR.
   const pages = await Promise.allSettled(TELEGRAM_CHANNELS.flatMap(channel => ['', '?q=Farmasi'].map(async query => {
-    const html = await read(`https://t.me/s/${channel}${query}`, signal);
+    const html = await read(`https://t.me/s/${channel}${query}`, requests);
     if (!html.includes('tgme_channel_info') || !html.includes('tgme_channel_history')) throw new Error('Pratinjau kanal publik belum dapat dibaca.');
     return { channel, posts: telegramPosts(html, channel) };
   })));
@@ -681,8 +719,9 @@ async function telegram(signal, verifiedAt) {
   };
 }
 
-export async function collectSource(source, signal, verifiedAt) {
+export async function collectSource(source, signal, verifiedAt, { area, requestLimit } = {}) {
+  const requests = { signal, remaining: requestLimit };
   const added = { farmacare, redy, lokerbandung: lokerBandung, medion, borromeus, alislam, advent, rshs, 'rsud-bandung': rsudBandung }[source.id];
-  const result = added ? await added(source, signal, verifiedAt) : source.id === 'kitalulus' ? await kitalulus(signal, verifiedAt) : source.id === 'bimma' ? await bimma(signal, verifiedAt) : source.id === 'jobstreet' ? await jobstreet(signal, verifiedAt) : source.id === 'telegram' ? await telegram(signal, verifiedAt) : await portal(source, signal, verifiedAt);
+  const result = added ? await added(source, requests, verifiedAt) : source.id === 'kitalulus' ? await kitalulus(requests, verifiedAt, area) : source.id === 'bimma' ? await bimma(requests, verifiedAt) : source.id === 'jobstreet' ? await jobstreet(requests, verifiedAt, area) : source.id === 'telegram' ? await telegram(requests, verifiedAt) : await portal(source, requests, verifiedAt);
   return { ...result, jobs: result.jobs.filter(job => job.company && job.title && acceptsD3(job.qualificationText)) };
 }

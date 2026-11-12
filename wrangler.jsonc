@@ -4,6 +4,10 @@
   "main": "./cloudflare/worker.mjs",
   "compatibility_date": "2026-10-01",
   "triggers": { "crons": ["*/5 * * * *"] },
+  "durable_objects": {
+    "bindings": [{ "name": "JOB_COLLECTOR", "class_name": "JobCollector" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["JobCollector"] }],
   "assets": {
     "directory": "./dist",
     "binding": "ASSETS",

@@ -24,24 +24,18 @@ Buka **http://127.0.0.1:4173**. `vite preview` tidak menjalankan API pemeriksa l
 
 ## Deploy ke Cloudflare
 
-Cloudflare Workers menyajikan tampilan dan `GET /api/jobs` dari Workers KV. GitHub Actions menjalankan pemeriksa yang sama dengan versi lokal, lalu mengirim hasilnya ke Worker. Dengan cara ini, pemeriksaan sumber yang melebihi batas 50 request per eksekusi dapat tetap berjalan saat memakai Workers Free.
+Cloudflare menjalankan pemeriksa dan menyajikan hasil di `GET /api/jobs`. Cron mengecek umur hasil tiap 5 menit dan memulai pemeriksaan ketika hasil berumur setidaknya 20 menit. Pemeriksa mengirim tiap bagian ke Durable Object terpisah dengan batas 45 request keluar, termasuk pengalihan. Hasil dari semua bagian disatukan di Workers KV. [Batas Workers](https://developers.cloudflare.com/workers/platform/limits/)
 
-1. Push perubahan ini ke branch utama GitHub. Di Cloudflare **Workers & Pages**, sambungkan repo dan gunakan nama Worker **`loker-farmasi`**. Isi **Build command** dengan `npm run build`, **Deploy command** dengan `npx wrangler deploy`, dan **Preview command** dengan `npx wrangler preview`. Konfigurasi Wrangler menyediakan penyimpanan KV `JOB_SNAPSHOTS` saat deploy.
-2. Buat token acak, misalnya dengan `node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"`. Pada Worker, buka **Settings → Variables and Secrets**, lalu tambahkan token sebagai secret **`JOB_SNAPSHOT_TOKEN`**.
-3. Pada repo GitHub, buka **Settings → Secrets and variables → Actions**. Tambahkan **`JOB_SNAPSHOT_TOKEN`** sebagai repository secret dengan nilai yang sama. Tambahkan **`WORKER_URL`** di tab **Variables** dengan alamat HTTPS Worker yang sudah aktif, misalnya `https://loker-farmasi.nama-akun.workers.dev`. Simpan token hanya di kedua pengaturan secret.
-4. Di tab **Actions**, buka **Perbarui lowongan → Run workflow** pada branch utama untuk mengisi daftar pertama. Setelah workflow berhasil, buka alamat Worker atau periksa `/api/jobs`.
+KitaLulus diperiksa per wilayah dengan maksimal 10 detail per wilayah. Jobstreet diperiksa terpisah untuk Bandung dan Cimahi dengan maksimal 25 detail per pencarian wilayah.
 
-### Aktifkan Cloudflare Cron
+1. Push perubahan ke `main` pada repo yang terhubung ke Worker **`loker-farmasi`**. Cloudflare Workers Builds memakai `npm run build` dan `npx wrangler deploy`. Deploy produksi membuat Durable Object SQLite `JOB_COLLECTOR` dan memasang Cron. Binding KV `JOB_SNAPSHOTS` menyimpan daftar.
+2. Buka **Settings → Trigger Events** untuk memeriksa jadwal `*/5 * * * *`. Perubahan jadwal dapat memerlukan hingga 15 menit untuk berlaku. Lihat waktu hasil terakhir di `/api/jobs`. [Cron Triggers](https://developers.cloudflare.com/workers/configuration/cron-triggers/)
 
-Buat [fine-grained token di GitHub](https://github.com/settings/personal-access-tokens/new) untuk repo **`thoriq1520/loker-farmasi`** dengan izin repo **Actions → Read and write**. Simpan token itu di Cloudflare **Production → Runtime variables and secrets** sebagai secret **`GITHUB_DISPATCH_TOKEN`**. `JOB_SNAPSHOT_TOKEN` tetap dipakai untuk mengirim hasil. [Izin GitHub untuk memulai workflow](https://docs.github.com/en/rest/actions/workflows#create-a-workflow-dispatch-event)
-
-Wrangler memasang Cron Trigger saat deploy. Cloudflare mengecek umur hasil tiap 5 menit dan meminta workflow baru sebelum hasil berumur 30 menit, biasanya sekitar setiap 25 menit. Jadwal GitHub tetap menjadi cadangan dan melewati pengambilan jika hasil masih baru. Jika token GitHub kedaluwarsa, ganti nilainya di Cloudflare. Perubahan Cron Trigger dapat memerlukan hingga 15 menit untuk berlaku. [Cron Triggers](https://developers.cloudflare.com/workers/configuration/cron-triggers/) · [Jadwal GitHub Actions](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule)
-
-Tombol **Muat ulang** membaca hasil terakhir yang tersimpan. **Run workflow** memulai pemeriksaan baru. Lowongan dengan hasil verifikasi berumur 30 menit disembunyikan sampai ada hasil baru.
+Tombol **Muat ulang** membaca hasil terakhir. Cron memulai pengambilan dari sumber. GitHub dipakai oleh Workers Builds untuk mengambil kode. Jika sumber memberi `403` atau gagal dijangkau dari Cloudflare, hasil dari sumber tersebut dilewati.
 
 ## Data dan aturan
 
-- Pemeriksaan saat aplikasi dimulai, lalu setiap **30 menit**. Tombol Perbarui meminta pemeriksaan tambahan dengan jeda minimum 60 detik. Permintaan bersamaan digabungkan.
+- Versi lokal memeriksa sumber saat aplikasi dimulai, lalu setiap **30 menit**. Tombol Perbarui meminta pemeriksaan tambahan dengan jeda minimum 60 detik. Permintaan bersamaan digabungkan.
 - Sumber: halaman publik **KitaLulus**, **BIMMA Disnaker Kota Bandung**, **Glints**, **Jobstreet**, **Telegram**, **Farmacare**, **REDY**, **LokerBandung.id**, **Medion**, dan kanal rumah sakit Bandung di bawah. Pemeriksaan otomatis menggunakan data publik.
 - Wilayah mencakup **Kota Bandung, Kabupaten Bandung, Kabupaten Bandung Barat, dan Cimahi**. Label `Bandung` tanpa kata `Kota` juga diterima. Lokasi di luar wilayah tersebut tetap disaring.
 - Kualifikasi harus menyebut **D3 Farmasi** (termasuk D3/S1 dan Diploma III Farmasi). Pendidikan S1/profesi saja tidak diterima.
@@ -94,4 +88,4 @@ npm run build
 
 Tes mencakup batas wilayah dan pendidikan, kedaluwarsa, urutan terbaru, filter, parsing data publik, penggabungan refresh, serta pembuangan data sumber yang gagal diperiksa.
 
-Untuk versi lokal, pembaruan berhenti ketika proses aplikasi atau komputer dimatikan. Untuk versi Cloudflare, pembaruan mengikuti jadwal GitHub Actions.
+Untuk versi lokal, pembaruan berhenti ketika proses aplikasi atau komputer dimatikan. Untuk versi Cloudflare, pembaruan mengikuti Cron Trigger.
