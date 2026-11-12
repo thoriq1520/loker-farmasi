@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { selectJobs, paginateJobs } from './jobs.mjs';
+import { REFRESH_MS, selectJobs, paginateJobs } from './jobs.mjs';
 import './style.css';
 
 function Icon({ name, size = 20, ...props }) {
@@ -117,6 +117,7 @@ function App() {
   const pagination = paginateJobs(jobs, page, pageSize);
   const checking = busy || data.refreshing;
   const snapshotMode = data.refreshMode === 'snapshot';
+  const snapshotStale = snapshotMode && now - Date.parse(data.lastCheckedAt) >= REFRESH_MS;
   const checkingLabel = snapshotMode ? 'Memuat' : 'Memeriksa';
   const refreshLabel = snapshotMode ? 'Muat ulang' : 'Perbarui';
   const connected = data.sources.filter(item => item.status === 'ok' || item.status === 'partial').length;
@@ -156,7 +157,7 @@ function App() {
             <div className="locked-location"><Icon name="pin" size={22} /><span><span className="field-label">Lokasi penempatan</span><strong>Bandung &amp; Cimahi</strong></span><Icon name="lock" size={16} /></div>
             <button className="btn btn--primary search-submit" type="submit">Cari lowongan<Icon name="arrow" size={18} /></button>
           </form>
-          <p className="refresh-interval">Diperbarui otomatis tiap 30 menit</p>
+          <p className="refresh-interval">{snapshotMode ? 'Diperiksa otomatis' : 'Diperbarui otomatis tiap 30 menit'}</p>
         </div>
       </section>
 
@@ -186,9 +187,9 @@ function App() {
             <h3><button className="job-title" onClick={() => openJob(job)}>{job.title}</button></h3><div className="job-tags"><span><Icon name="pin" size={15} />{job.city}</span>{job.type && job.type !== 'Tidak disebutkan' && <span>{job.type}</span>}<span>D3 Farmasi</span></div>{job.salaryMin > 0 && <p className="salary">{salaryLabel(job)}</p>}<div className="job-card-bottom"><span>{job.publishedAt ? 'Tayang' : 'Diperbarui'} {date(job.publishedAt || job.updatedAt)}<span className="meta-separator">·</span>{job.sourceName}</span><button className="job-detail-link" onClick={() => openJob(job)}>Lihat detail<Icon name="arrow" size={17} /></button></div>
           </article>)}</div> : <div className="empty-state">
             <div className="empty-visual" aria-hidden="true"><span className="empty-visual-back" /><div className="empty-sheet"><span /><span /><span /><Icon name={tab === 'saved' ? 'bookmark' : 'search'} size={32} /></div><span className="empty-check"><Icon name="check" size={15} /></span></div>
-            <h3>{tab === 'saved' ? 'Belum ada simpanan' : 'Tidak ada hasil'}</h3>
-            {tab === 'saved' ? <p>Tekan ikon simpan pada lowongan.</p> : hasFilter && <p>Ubah kata kunci atau filter.</p>}
-            <button className="btn btn--secondary" onClick={tab === 'saved' ? () => setTab('all') : hasFilter ? resetFilters : () => sourceDialog.current.showModal()}>{tab === 'saved' ? 'Cari lowongan' : hasFilter ? 'Reset filter' : 'Lihat status sumber'}<Icon name="arrow" size={17} /></button>
+            <h3>{snapshotStale ? 'Menunggu pemeriksaan terbaru' : tab === 'saved' ? 'Belum ada simpanan' : 'Tidak ada hasil'}</h3>
+            {!snapshotStale && (tab === 'saved' ? <p>Tekan ikon simpan pada lowongan.</p> : hasFilter && <p>Ubah kata kunci atau filter.</p>)}
+            {!snapshotStale && <button className="btn btn--secondary" onClick={tab === 'saved' ? () => setTab('all') : hasFilter ? resetFilters : () => sourceDialog.current.showModal()}>{tab === 'saved' ? 'Cari lowongan' : hasFilter ? 'Reset filter' : 'Lihat status sumber'}<Icon name="arrow" size={17} /></button>}
           </div>}
 
           {jobs.length > 0 && <div className="pagination">
@@ -209,7 +210,20 @@ function App() {
 
     <dialog className="modal sources-modal" ref={sourceDialog} onClick={event => { if (event.target === event.currentTarget) sourceDialog.current.close(); }} aria-labelledby="sources-title">
       <div className="modal-head"><h2 id="sources-title">Sumber lowongan</h2><button className="icon-button" onClick={() => sourceDialog.current.close()} aria-label="Tutup status sumber"><Icon name="close" /></button></div>
-      <div className="source-list">{data.sources.map(item => <div className="source-row" key={item.id}><span className={`source-symbol symbol-${item.id}`} aria-hidden="true">{item.name.charAt(0)}</span><div className="source-info"><div><strong>{item.name}</strong><span className={`source-state state-${item.status}`}>{statusLabel[item.status]}</span></div>{item.status !== 'manual' && <span className="source-checked">{item.count} lowongan{item.checkedAt ? ` · Dicek ${time(item.checkedAt)}` : ''}</span>}<a className="source-open" href={item.url} target="_blank" rel="noopener noreferrer">Buka {item.name}<Icon name="external" size={14} /></a></div></div>)}</div>
+      {snapshotStale && <p className="source-checked">Status pemeriksaan terakhir, {date(data.lastCheckedAt)}, {time(data.lastCheckedAt)}</p>}
+      <div className="source-list">{data.sources.map(item => (
+        <div className="source-row" key={item.id}>
+          <span className={`source-symbol symbol-${item.id}`} aria-hidden="true">{item.name.charAt(0)}</span>
+          <div className="source-info">
+            <div><strong>{item.name}</strong><span className={`source-state state-${item.status}`}>{statusLabel[item.status]}</span></div>
+            {item.status !== 'manual' && <span className="source-checked">
+              {item.status === 'error' && item.note ? item.note : `${item.count} lowongan`}
+              {item.checkedAt ? ` · Dicek ${time(item.checkedAt)}` : ''}
+            </span>}
+            <a className="source-open" href={item.url} target="_blank" rel="noopener noreferrer">Buka {item.name}<Icon name="external" size={14} /></a>
+          </div>
+        </div>
+      ))}</div>
     </dialog>
 
     <dialog className="modal detail-modal" ref={detailDialog} onClick={event => { if (event.target === event.currentTarget) detailDialog.current.close(); }} aria-labelledby="detail-title">

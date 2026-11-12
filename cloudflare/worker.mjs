@@ -2,6 +2,9 @@ import { timingSafeEqual } from 'node:crypto';
 import { REFRESH_MS, selectJobs } from '../src/jobs.mjs';
 
 const SNAPSHOT_KEY = 'latest';
+const DISPATCH_KEY = 'last-workflow-dispatch';
+const CRON_INTERVAL_MS = 5 * 60_000;
+const WORKFLOW_DISPATCH_URL = 'https://api.github.com/repos/thoriq1520/loker-farmasi/actions/workflows/refresh-jobs.yml/dispatches';
 const MAX_SNAPSHOT_BYTES = 1024 * 1024;
 const encoder = new TextEncoder();
 
@@ -64,6 +67,33 @@ async function readJobs(env) {
 }
 
 export default {
+  async scheduled(controller, env) {
+    if (!env.GITHUB_DISPATCH_TOKEN) return;
+    const snapshot = await env.JOB_SNAPSHOTS.get(SNAPSHOT_KEY, 'json');
+    // Allow two cron ticks for the runner to start and publish before the current results expire.
+    if (Date.now() - Date.parse(snapshot?.lastCheckedAt) < REFRESH_MS - 2 * CRON_INTERVAL_MS) return;
+
+    const lastDispatch = Number(await env.JOB_SNAPSHOTS.get(DISPATCH_KEY));
+    if (lastDispatch && controller.scheduledTime - lastDispatch < REFRESH_MS - CRON_INTERVAL_MS) return;
+
+    const response = await fetch(WORKFLOW_DISPATCH_URL, {
+      method: 'POST',
+      redirect: 'error',
+      signal: AbortSignal.timeout(10000),
+      headers: {
+        Accept: 'application/vnd.github+json',
+        Authorization: 'Bearer ' + env.GITHUB_DISPATCH_TOKEN,
+        'Content-Type': 'application/json',
+        'User-Agent': 'loker-farmasi-worker',
+        'X-GitHub-Api-Version': '2026-03-10',
+      },
+      body: JSON.stringify({ ref: 'main' }),
+    });
+    await response.body?.cancel();
+    if (!response.ok) throw new Error('GitHub gagal memulai pemeriksaan (HTTP ' + response.status + ').');
+    await env.JOB_SNAPSHOTS.put(DISPATCH_KEY, String(controller.scheduledTime), { expirationTtl: 3600 });
+  },
+
   async fetch(request, env) {
     const { pathname } = new URL(request.url);
     if (pathname === '/api/jobs' && request.method === 'GET') return readJobs(env);

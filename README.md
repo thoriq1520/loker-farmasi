@@ -24,14 +24,20 @@ Buka **http://127.0.0.1:4173**. `vite preview` tidak menjalankan API pemeriksa l
 
 ## Deploy ke Cloudflare
 
-Cloudflare Workers menyajikan tampilan dan `GET /api/jobs` dari Workers KV. GitHub Actions menjalankan pemeriksa yang sama dengan versi lokal setiap 30 menit, lalu mengirim hasilnya ke Worker. Dengan cara ini, pemeriksaan sumber yang melebihi batas 50 request per eksekusi dapat tetap berjalan saat memakai Workers Free.
+Cloudflare Workers menyajikan tampilan dan `GET /api/jobs` dari Workers KV. GitHub Actions menjalankan pemeriksa yang sama dengan versi lokal, lalu mengirim hasilnya ke Worker. Dengan cara ini, pemeriksaan sumber yang melebihi batas 50 request per eksekusi dapat tetap berjalan saat memakai Workers Free.
 
 1. Push perubahan ini ke branch utama GitHub. Di Cloudflare **Workers & Pages**, sambungkan repo dan gunakan nama Worker **`loker-farmasi`**. Isi **Build command** dengan `npm run build`, **Deploy command** dengan `npx wrangler deploy`, dan **Preview command** dengan `npx wrangler preview`. Konfigurasi Wrangler menyediakan penyimpanan KV `JOB_SNAPSHOTS` saat deploy.
 2. Buat token acak, misalnya dengan `node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"`. Pada Worker, buka **Settings → Variables and Secrets**, lalu tambahkan token sebagai secret **`JOB_SNAPSHOT_TOKEN`**.
 3. Pada repo GitHub, buka **Settings → Secrets and variables → Actions**. Tambahkan **`JOB_SNAPSHOT_TOKEN`** sebagai repository secret dengan nilai yang sama. Tambahkan **`WORKER_URL`** di tab **Variables** dengan alamat HTTPS Worker yang sudah aktif, misalnya `https://loker-farmasi.nama-akun.workers.dev`. Simpan token hanya di kedua pengaturan secret.
 4. Di tab **Actions**, buka **Perbarui lowongan → Run workflow** pada branch utama untuk mengisi daftar pertama. Setelah workflow berhasil, buka alamat Worker atau periksa `/api/jobs`.
 
-Tombol **Muat ulang** pada versi cloud membaca hasil terbaru yang sudah disimpan. **Run workflow** menjalankan pemeriksaan baru. GitHub Actions dapat menunda jadwal dan hasil verifikasi yang sudah berumur 30 menit disembunyikan. Pada repo publik, GitHub dapat menonaktifkan jadwal setelah 60 hari tanpa aktivitas repo. Periksa kuota Actions jika repo privat. Lihat [konfigurasi Workers Builds](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/), [batas Workers](https://developers.cloudflare.com/workers/platform/limits/), dan [jadwal GitHub Actions](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule).
+### Aktifkan Cloudflare Cron
+
+Buat [fine-grained token di GitHub](https://github.com/settings/personal-access-tokens/new) untuk repo **`thoriq1520/loker-farmasi`** dengan izin repo **Actions → Read and write**. Simpan token itu di Cloudflare **Production → Runtime variables and secrets** sebagai secret **`GITHUB_DISPATCH_TOKEN`**. `JOB_SNAPSHOT_TOKEN` tetap dipakai untuk mengirim hasil. [Izin GitHub untuk memulai workflow](https://docs.github.com/en/rest/actions/workflows#create-a-workflow-dispatch-event)
+
+Wrangler memasang Cron Trigger saat deploy. Cloudflare mengecek umur hasil tiap 5 menit dan meminta workflow baru sebelum hasil berumur 30 menit, biasanya sekitar setiap 25 menit. Jadwal GitHub tetap menjadi cadangan dan melewati pengambilan jika hasil masih baru. Jika token GitHub kedaluwarsa, ganti nilainya di Cloudflare. Perubahan Cron Trigger dapat memerlukan hingga 15 menit untuk berlaku. [Cron Triggers](https://developers.cloudflare.com/workers/configuration/cron-triggers/) · [Jadwal GitHub Actions](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule)
+
+Tombol **Muat ulang** membaca hasil terakhir yang tersimpan. **Run workflow** memulai pemeriksaan baru. Lowongan dengan hasil verifikasi berumur 30 menit disembunyikan sampai ada hasil baru.
 
 ## Data dan aturan
 

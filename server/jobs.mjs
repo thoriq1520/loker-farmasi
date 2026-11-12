@@ -36,7 +36,7 @@ export function createJobService({ collect = collectSource, interval = REFRESH_M
           const result = await collect(source, controller.signal, checkedAt);
           return { jobs: result.jobs, source: { ...source, status: result.partial ? 'partial' : 'ok', note: result.note, checkedAt, scanned: result.scanned, count: 0 } };
         } catch (error) {
-          return { jobs: [], source: { ...source, status: 'error', note: error.name === 'TimeoutError' || error.name === 'AbortError' ? 'Pemeriksaan melewati batas waktu. Coba lagi nanti.' : error.message.includes('fetch failed') ? 'Sumber tidak dapat dijangkau. Periksa koneksi internet.' : error.message, checkedAt, count: 0 } };
+          return { jobs: [], source: { ...source, status: 'error', note: error.name === 'TimeoutError' || error.name === 'AbortError' ? 'Pemeriksaan melewati batas waktu.' : error.message.includes('fetch failed') ? 'Sumber tidak dapat dijangkau saat pemeriksaan.' : error.message, checkedAt, count: 0 } };
         }
       }));
       // Failed sources lose their previous results immediately: never serve unverified stale jobs.

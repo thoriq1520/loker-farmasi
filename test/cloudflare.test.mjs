@@ -65,3 +65,40 @@ test('Cloudflare serves static assets and only accepts fresh snapshots from the 
   assert.deepEqual(expired.jobs, []);
   assert.equal(expired.sources[0].count, 0);
 });
+
+test('Cloudflare requests a workflow before the snapshot expires and limits duplicate runs', async t => {
+  const now = Date.now();
+  const minute = 60_000;
+  const kv = new Map([['latest', { lastCheckedAt: new Date(now - 10 * minute).toISOString() }]]);
+  const env = {
+    GITHUB_DISPATCH_TOKEN: 'fixture-token',
+    JOB_SNAPSHOTS: {
+      async get(key) { return kv.get(key); },
+      async put(key, value) { kv.set(key, value); },
+    },
+  };
+  const requests = [];
+  let status = 204;
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    requests.push({ url, options });
+    return new Response(null, { status });
+  });
+  const tick = (time = now, bindings = env) => worker.scheduled({ scheduledTime: time }, bindings);
+
+  await tick(now, {});
+  await tick();
+  assert.equal(requests.length, 0);
+  kv.get('latest').lastCheckedAt = new Date(now - 24 * minute).toISOString();
+  await tick();
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url, 'https://api.github.com/repos/thoriq1520/loker-farmasi/actions/workflows/refresh-jobs.yml/dispatches');
+  assert.equal(requests[0].options.method, 'POST');
+  assert.equal(requests[0].options.headers.Authorization, 'Bearer fixture-token');
+  assert.deepEqual(JSON.parse(requests[0].options.body), { ref: 'main' });
+
+  await tick(now + 5 * minute);
+  assert.equal(requests.length, 1);
+  status = 403;
+  await assert.rejects(tick(now + 25 * minute), /HTTP 403/);
+  assert.equal(kv.get('last-workflow-dispatch'), String(now));
+});
